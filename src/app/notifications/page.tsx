@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import Link from 'next/link'
 
 interface Notification {
@@ -34,36 +33,36 @@ export default function NotificationsPage() {
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState<'all' | 'unread'>('unread')
 
-  const supabase = createClient()
-
   const loadNotifications = useCallback(async () => {
     setLoading(true)
-    let query = supabase
-      .from('notifications')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50)
-
-    if (filter === 'unread') {
-      query = query.eq('is_read', false)
+    const params = filter === 'unread' ? '?unread=true' : ''
+    const res = await fetch(`/api/notifications${params}`)
+    if (res.ok) {
+      const d = await res.json()
+      setNotifications(d.notifications || [])
     }
-
-    const { data } = await query
-    setNotifications((data as any[]) || [])
     setLoading(false)
-  }, [supabase, filter])
+  }, [filter])
 
   useEffect(() => {
     loadNotifications()
   }, [loadNotifications])
 
   const markRead = async (id: string) => {
-    await supabase.from('notifications').update({ is_read: true }).eq('id', id)
+    await fetch('/api/notifications', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, is_read: true } : n)))
   }
 
   const markAllRead = async () => {
-    await supabase.from('notifications').update({ is_read: true }).eq('is_read', false)
+    await fetch('/api/notifications', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ markAll: true }),
+    })
     setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })))
   }
 

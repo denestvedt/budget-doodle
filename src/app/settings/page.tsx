@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { useClerk } from '@clerk/nextjs'
 import { useRouter } from 'next/navigation'
 
 interface UserProfile {
@@ -29,6 +29,7 @@ interface Account {
 
 export default function SettingsPage() {
   const router = useRouter()
+  const { signOut } = useClerk()
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [household, setHousehold] = useState<Household | null>(null)
   const [members, setMembers] = useState<UserProfile[]>([])
@@ -42,96 +43,69 @@ export default function SettingsPage() {
   const [editingAccount, setEditingAccount] = useState<string | null>(null)
   const [accountForm, setAccountForm] = useState({ name: '', institution: '', type: 'CHECKING', class: 'Asset', last_balance: '' })
 
-  const supabase = createClient()
-
   const loadData = useCallback(async () => {
     setLoading(true)
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) { router.push('/login'); return }
-
-    const { data: profileData } = await supabase
-      .from('user_profiles')
-      .select('id, email, display_name, role')
-      .eq('id', session.user.id)
-      .single()
-
-    setProfile(profileData)
-    setDisplayName(profileData?.display_name || '')
-
-    if (profileData?.role === 'owner' || true) {
-      const { data: householdData } = await supabase
-        .from('households')
-        .select('id, name')
-        .single()
-
-      setHousehold(householdData)
-      setHouseholdName(householdData?.name || '')
-
-      const { data: membersData } = await supabase
-        .from('user_profiles')
-        .select('id, email, display_name, role')
-        .order('created_at')
-
-      setMembers(membersData || [])
+    const res = await fetch('/api/settings')
+    if (res.ok) {
+      const d = await res.json()
+      setProfile(d.profile || null)
+      setDisplayName(d.profile?.display_name || '')
+      setHousehold(d.household || null)
+      setHouseholdName(d.household?.name || '')
+      setMembers(d.members || [])
+      setAccounts(d.accounts || [])
     }
-
-    const { data: accountsData } = await supabase
-      .from('accounts')
-      .select('*')
-      .order('institution')
-      .order('name')
-
-    setAccounts(accountsData || [])
     setLoading(false)
-  }, [supabase, router])
+  }, [])
 
   useEffect(() => {
     loadData()
   }, [loadData])
 
   const saveProfile = async () => {
-    if (!profile) return
     setSaving(true)
-    await supabase
-      .from('user_profiles')
-      .update({ display_name: displayName })
-      .eq('id', profile.id)
+    await fetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ displayName }),
+    })
     setMessage('Profile saved.')
     setSaving(false)
     setTimeout(() => setMessage(''), 3000)
   }
 
   const saveHousehold = async () => {
-    if (!household) return
     setSaving(true)
-    await supabase
-      .from('households')
-      .update({ name: householdName })
-      .eq('id', household.id)
+    await fetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ householdName }),
+    })
     setMessage('Household name saved.')
     setSaving(false)
     setTimeout(() => setMessage(''), 3000)
   }
 
-  const signOut = async () => {
-    await supabase.auth.signOut()
-    router.push('/login')
+  const handleSignOut = async () => {
+    await signOut()
+    router.push('/sign-in')
   }
 
   const saveAccount = async (accountId: string) => {
     setSaving(true)
     const balance = parseFloat(accountForm.last_balance) || 0
-    await supabase
-      .from('accounts')
-      .update({
+    await fetch('/api/accounts', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: accountId,
         name: accountForm.name,
         institution: accountForm.institution,
         type: accountForm.type,
         class: accountForm.class,
         last_balance: balance,
-        last_updated: new Date().toISOString(),
-      })
-      .eq('id', accountId)
+      }),
+    })
     setEditingAccount(null)
     setSaving(false)
     loadData()
@@ -139,23 +113,28 @@ export default function SettingsPage() {
 
   const addAccount = async () => {
     setSaving(true)
-    const balance = parseFloat(accountForm.last_balance) || 0
-    await supabase
-      .from('accounts')
-      .insert({
+    await fetch('/api/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         name: accountForm.name,
         institution: accountForm.institution,
-        type: accountForm.type as any,
+        type: accountForm.type,
         class: accountForm.type === 'CREDIT' ? 'Liability' : 'Asset',
-        last_balance: balance,
-      })
+        last_balance: parseFloat(accountForm.last_balance) || 0,
+      }),
+    })
     setAccountForm({ name: '', institution: '', type: 'CHECKING', class: 'Asset', last_balance: '' })
     setSaving(false)
     loadData()
   }
 
   const toggleAccountActive = async (id: string, current: boolean) => {
-    await supabase.from('accounts').update({ is_active: !current }).eq('id', id)
+    await fetch('/api/accounts', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, is_active: !current }),
+    })
     setAccounts((prev) => prev.map((a) => (a.id === id ? { ...a, is_active: !current } : a)))
   }
 
@@ -209,7 +188,7 @@ export default function SettingsPage() {
                 <button onClick={saveProfile} disabled={saving} className="btn-primary">
                   Save Profile
                 </button>
-                <button onClick={signOut} className="btn-danger">
+                <button onClick={handleSignOut} className="btn-danger">
                   Sign Out
                 </button>
               </div>

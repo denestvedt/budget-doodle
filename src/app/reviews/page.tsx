@@ -1,8 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { createClient } from '@/lib/supabase/client'
-import { formatCurrency, formatPercent, formatMonthYear, getCurrentMonthStart } from '@/lib/utils/format'
+import { formatCurrency, formatPercent, formatMonthYear } from '@/lib/utils/format'
 import Link from 'next/link'
 
 interface MonthlyReview {
@@ -25,7 +24,6 @@ interface ReviewData {
 
 export default function ReviewsPage() {
   const [selectedMonth, setSelectedMonth] = useState(() => {
-    // Default to previous month
     const now = new Date()
     const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1)
     return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}-01`
@@ -38,181 +36,56 @@ export default function ReviewsPage() {
   const [reviews, setReviews] = useState<MonthlyReview[]>([])
   const [weeklyStats, setWeeklyStats] = useState<{ spend: number; uncategorized: number; topCategories: any[] } | null>(null)
 
-  const supabase = createClient()
-
-  const loadReviews = useCallback(async () => {
-    const { data } = await supabase
-      .from('monthly_reviews')
-      .select('id, month, notes, is_locked, completed_at')
-      .order('month', { ascending: false })
-      .limit(12)
-    setReviews(data || [])
-  }, [supabase])
-
-  const loadMonthData = useCallback(async () => {
+  const loadData = useCallback(async () => {
     setLoading(true)
-
-    const nextMonth = getNextMonth(selectedMonth)
-
-    // Load or create review
-    const { data: existingReview } = await supabase
-      .from('monthly_reviews')
-      .select('*')
-      .eq('month', selectedMonth)
-      .single()
-
-    setReview(existingReview || null)
-    setNotes(existingReview?.notes || '')
-
-    // Load transactions for the month
-    const { data: transactions } = await supabase
-      .from('transactions')
-      .select('amount, category_id, categories(name, group_name, type)')
-      .gte('date', selectedMonth)
-      .lt('date', nextMonth)
-      .eq('is_transfer', false)
-
-    // Load budgets
-    const { data: budgets } = await supabase
-      .from('budgets')
-      .select('amount, category_id, categories(name, group_name)')
-      .eq('month', selectedMonth)
-
-    let income = 0
-    let expenses = 0
-    const catActual: Record<string, { name: string; group: string; actual: number }> = {}
-
-    for (const tx of (transactions as any[]) || []) {
-      const cat = tx.categories
-      if (!cat) continue
-      if (cat.type === 'Income') {
-        income += Math.abs(tx.amount)
-      } else if (cat.type === 'Expense') {
-        expenses += Math.abs(tx.amount)
-        if (!catActual[tx.category_id]) {
-          catActual[tx.category_id] = { name: cat.name, group: cat.group_name, actual: 0 }
-        }
-        catActual[tx.category_id].actual += Math.abs(tx.amount)
-      }
+    const res = await fetch(`/api/reviews?month=${selectedMonth}`)
+    if (res.ok) {
+      const d = await res.json()
+      setReviews(d.reviews || [])
+      setReview(d.review || null)
+      setNotes(d.review?.notes || '')
+      setReviewData(d.reviewData || null)
+      setWeeklyStats(d.weeklyStats || null)
     }
-
-    const budgetMap: Record<string, number> = {}
-    for (const b of (budgets as any[]) || []) {
-      budgetMap[b.category_id] = b.amount
-    }
-
-    const categoryBreakdown = Object.entries(catActual).map(([catId, data]) => ({
-      ...data,
-      budgeted: budgetMap[catId] || 0,
-    })).sort((a, b) => b.actual - a.actual)
-
-    // Load current account balances
-    const { data: accounts } = await supabase
-      .from('accounts')
-      .select('class, type, last_balance')
-      .eq('is_active', true)
-
-    let netWorth = 0
-    let debtBalance = 0
-    let investmentBalance = 0
-    for (const a of accounts || []) {
-      if (a.class === 'Asset') {
-        netWorth += a.last_balance || 0
-        if (a.type === 'INVESTMENT') investmentBalance += a.last_balance || 0
-      } else {
-        netWorth -= Math.abs(a.last_balance || 0)
-        if (a.type === 'CREDIT') debtBalance += Math.abs(a.last_balance || 0)
-      }
-    }
-
-    const savingsRate = income > 0 ? Math.max(0, ((income - expenses) / income) * 100) : 0
-
-    setReviewData({ income, expenses, netWorth, savingsRate, debtBalance, investmentBalance, categoryBreakdown })
-
-    // Load weekly stats (last 7 days)
-    const sevenDaysAgo = new Date()
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
-    const weekStart = sevenDaysAgo.toISOString().substring(0, 10)
-
-    const { data: weekTx } = await supabase
-      .from('transactions')
-      .select('amount, category_id, is_reviewed, categories(name, group_name, type)')
-      .gte('date', weekStart)
-      .eq('is_transfer', false)
-
-    let weekSpend = 0
-    let uncategorized = 0
-    const weekCatSpend: Record<string, { name: string; amount: number }> = {}
-    for (const tx of (weekTx as any[]) || []) {
-      const cat = tx.categories
-      if (!cat || cat.type !== 'Expense') continue
-      weekSpend += Math.abs(tx.amount)
-      if (!tx.is_reviewed && !tx.category_id) uncategorized++
-      if (!weekCatSpend[cat.name]) weekCatSpend[cat.name] = { name: cat.name, amount: 0 }
-      weekCatSpend[cat.name].amount += Math.abs(tx.amount)
-    }
-
-    const topCategories = Object.values(weekCatSpend)
-      .sort((a, b) => b.amount - a.amount)
-      .slice(0, 3)
-
-    setWeeklyStats({ spend: weekSpend, uncategorized, topCategories })
-
     setLoading(false)
-  }, [supabase, selectedMonth])
+  }, [selectedMonth])
 
   useEffect(() => {
-    loadReviews()
-    loadMonthData()
-  }, [loadReviews, loadMonthData])
+    loadData()
+  }, [loadData])
 
   const saveNotes = async () => {
     setSaving(true)
-    const { data: { session } } = await supabase.auth.getSession()
-
-    if (review) {
-      await supabase
-        .from('monthly_reviews')
-        .update({ notes })
-        .eq('id', review.id)
-    } else {
-      await supabase
-        .from('monthly_reviews')
-        .insert({ month: selectedMonth, notes, reviewed_by_user_id: session?.user?.id })
-    }
+    await fetch('/api/reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ month: selectedMonth, notes }),
+    })
     setSaving(false)
-    loadReviews()
+    loadData()
   }
 
   const completeReview = async () => {
     setSaving(true)
-    const { data: { session } } = await supabase.auth.getSession()
-    const now = new Date().toISOString()
-
-    if (review) {
-      await supabase
-        .from('monthly_reviews')
-        .update({ notes, completed_at: now, reviewed_by_user_id: session?.user?.id })
-        .eq('id', review.id)
-    } else {
-      await supabase
-        .from('monthly_reviews')
-        .insert({ month: selectedMonth, notes, completed_at: now, reviewed_by_user_id: session?.user?.id })
-    }
+    await fetch('/api/reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ month: selectedMonth, notes, complete: true }),
+    })
     setSaving(false)
-    loadReviews()
-    loadMonthData()
+    loadData()
   }
 
   const archiveMonth = async () => {
     if (!review) return
     setSaving(true)
-    await supabase
-      .from('monthly_reviews')
-      .update({ is_locked: true })
-      .eq('id', review.id)
+    await fetch('/api/reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ month: selectedMonth, archive: true }),
+    })
     setSaving(false)
-    loadMonthData()
+    loadData()
   }
 
   return (
@@ -283,7 +156,7 @@ export default function ReviewsPage() {
                 {weeklyStats.topCategories.length > 0 && (
                   <div>
                     <div className="text-xs text-gray-500 uppercase mb-1">Top Categories</div>
-                    {weeklyStats.topCategories.map((cat) => (
+                    {weeklyStats.topCategories.map((cat: any) => (
                       <div key={cat.name} className="flex justify-between text-sm py-1">
                         <span className="text-gray-700">{cat.name}</span>
                         <span className="font-medium text-gray-800">{formatCurrency(cat.amount)}</span>
@@ -411,10 +284,4 @@ export default function ReviewsPage() {
       </div>
     </div>
   )
-}
-
-function getNextMonth(monthStr: string): string {
-  const [year, month] = monthStr.split('-').map(Number)
-  if (month === 12) return `${year + 1}-01-01`
-  return `${year}-${String(month + 1).padStart(2, '0')}-01`
 }

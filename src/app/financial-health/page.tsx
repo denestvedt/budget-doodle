@@ -1,13 +1,10 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import {
   formatCurrency,
   formatPercent,
   formatShortMonth,
-  getLast12Months,
-  getMonthStart,
 } from '@/lib/utils/format'
 import {
   LineChart,
@@ -38,108 +35,15 @@ export default function FinancialHealthPage() {
   const [loading, setLoading] = useState(true)
   const [savingsTarget, setSavingsTarget] = useState(20)
 
-  const supabase = createClient()
-
   const loadData = useCallback(async () => {
     setLoading(true)
-    const last12 = getLast12Months()
-
-    const { data: accounts } = await supabase
-      .from('accounts')
-      .select('id, type, class')
-      .eq('is_active', true)
-
-    const { data: snapshots } = await supabase
-      .from('balance_snapshots')
-      .select('account_id, balance, snapshot_date')
-      .gte('snapshot_date', last12[0])
-      .order('snapshot_date')
-
-    const { data: transactions } = await supabase
-      .from('transactions')
-      .select('amount, date, categories(type)')
-      .gte('date', last12[0])
-      .eq('is_transfer', false)
-
-    // Build monthly metrics
-    const accountMap = new Map((accounts || []).map((a) => [a.id, a]))
-
-    const monthlyData: Record<string, MonthlyMetric> = {}
-    for (const month of last12) {
-      monthlyData[month] = {
-        month,
-        label: formatShortMonth(month),
-        netWorth: 0,
-        savingsRate: 0,
-        debtBalance: 0,
-        investmentBalance: 0,
-        income: 0,
-        expenses: 0,
-      }
+    const res = await fetch('/api/financial-health')
+    if (res.ok) {
+      const d = await res.json()
+      setMetrics(d.metrics || [])
     }
-
-    // Process transactions
-    for (const tx of (transactions as any[]) || []) {
-      const monthKey = tx.date.substring(0, 7) + '-01'
-      if (!monthlyData[monthKey]) continue
-      const cat = tx.categories
-      if (cat?.type === 'Income') {
-        monthlyData[monthKey].income += Math.abs(tx.amount)
-      } else if (cat?.type === 'Expense') {
-        monthlyData[monthKey].expenses += Math.abs(tx.amount)
-      }
-    }
-
-    // Calculate savings rates
-    for (const month of last12) {
-      const d = monthlyData[month]
-      if (d.income > 0) {
-        d.savingsRate = Math.max(0, ((d.income - d.expenses) / d.income) * 100)
-      }
-    }
-
-    // Process balance snapshots — get latest snapshot per account per month
-    const snapshotByMonthAccount: Record<string, Record<string, number>> = {}
-    for (const snap of (snapshots as any[]) || []) {
-      const monthKey = snap.snapshot_date.substring(0, 7) + '-01'
-      if (!snapshotByMonthAccount[monthKey]) snapshotByMonthAccount[monthKey] = {}
-      snapshotByMonthAccount[monthKey][snap.account_id] = snap.balance
-    }
-
-    // For each month, calculate net worth from snapshots
-    // Use the most recent snapshot up to that month
-    const latestBalances: Record<string, number> = {}
-
-    for (const month of last12) {
-      // Update latestBalances with any new snapshots this month
-      if (snapshotByMonthAccount[month]) {
-        Object.assign(latestBalances, snapshotByMonthAccount[month])
-      }
-
-      let netWorth = 0
-      let debtBalance = 0
-      let investmentBalance = 0
-
-      for (const [acctId, balance] of Object.entries(latestBalances)) {
-        const acct = accountMap.get(acctId)
-        if (!acct) continue
-        if (acct.class === 'Asset') {
-          netWorth += balance
-          if (acct.type === 'INVESTMENT') investmentBalance += balance
-        } else {
-          netWorth -= Math.abs(balance)
-          if (acct.type === 'CREDIT') debtBalance += Math.abs(balance)
-        }
-      }
-
-      monthlyData[month].netWorth = netWorth
-      monthlyData[month].debtBalance = debtBalance
-      monthlyData[month].investmentBalance = investmentBalance
-    }
-
-    setMetrics(Object.values(monthlyData))
     setLoading(false)
-  }, [supabase])
+  }, [])
 
   useEffect(() => {
     loadData()
@@ -172,7 +76,7 @@ export default function FinancialHealthPage() {
               <div className={`text-sm mt-1 ${netWorthChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                 {netWorthChange >= 0 ? '+' : ''}{formatCurrency(netWorthChange)} MoM
               </div>
-              <div className={`text-xs text-gray-400 mt-0.5`}>
+              <div className="text-xs text-gray-400 mt-0.5">
                 {ytdChange >= 0 ? '+' : ''}{formatCurrency(ytdChange)} YTD
               </div>
             </div>
@@ -188,9 +92,7 @@ export default function FinancialHealthPage() {
               >
                 {formatPercent(latest.savingsRate)}
               </div>
-              <div className="text-sm text-gray-400 mt-1">
-                Target: {savingsTarget}%
-              </div>
+              <div className="text-sm text-gray-400 mt-1">Target: {savingsTarget}%</div>
             </div>
           </div>
           <div className="card">
@@ -285,14 +187,7 @@ export default function FinancialHealthPage() {
                     strokeDasharray="4 4"
                     label={{ value: `Target ${savingsTarget}%`, fontSize: 10, fill: '#E8A020', position: 'right' }}
                   />
-                  <Line
-                    type="monotone"
-                    dataKey="savingsRate"
-                    stroke="#16a34a"
-                    strokeWidth={2}
-                    dot={{ r: 3 }}
-                    activeDot={{ r: 5 }}
-                  />
+                  <Line type="monotone" dataKey="savingsRate" stroke="#16a34a" strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
