@@ -1,152 +1,122 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { createServerClient } from '@/lib/supabase/server'
+import { NextResponse } from 'next/server'
+import { requireHousehold } from '@/lib/db/auth'
+import { sql } from '@/lib/db'
 
-export async function POST(request: NextRequest) {
-  const supabase = createServerClient()
+export async function POST() {
+  try {
+    const { householdId } = await requireHousehold()
 
-  const { data: { session } } = await supabase.auth.getSession()
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+    const now = new Date()
+    const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+    const nextMonth = now.getMonth() === 11
+      ? `${now.getFullYear() + 1}-01-01`
+      : `${now.getFullYear()}-${String(now.getMonth() + 2).padStart(2, '0')}-01`
+    const dayOfMonth = now.getDate()
+    const totalDays = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+    const monthFraction = dayOfMonth / totalDays
+    const oneHourAgo = new Date(now.getTime() - 3600000).toISOString()
 
-  const now = new Date()
-  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
-  const nextMonth = now.getMonth() === 11
-    ? `${now.getFullYear() + 1}-01-01`
-    : `${now.getFullYear()}-${String(now.getMonth() + 2).padStart(2, '0')}-01`
+    const alerts: Array<{ type: string; message: string; metadata?: object }> = []
 
-  const dayOfMonth = now.getDate()
-  const totalDays = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
-  const monthFraction = dayOfMonth / totalDays
+    const [budgets, transactions] = await Promise.all([
+      sql`
+        SELECT b.category_id, b.amount, c.name as cat_name
+        FROM budgets b JOIN categories c ON c.id = b.category_id
+        WHERE b.household_id = ${householdId} AND b.month = ${currentMonth} AND b.amount > 0
+      `,
+      sql`
+        SELECT category_id, ABS(amount) as amount FROM transactions
+        WHERE household_id = ${householdId}
+          AND date >= ${currentMonth} AND date < ${nextMonth}
+          AND is_transfer = false AND category_id IS NOT NULL
+      `,
+    ])
 
-  const alerts: Array<{ type: string; message: string; metadata?: object }> = []
+    const actualByCategory: Record<string, number> = {}
+    for (const t of transactions) {
+      actualByCategory[t.category_id] = (actualByCategory[t.category_id] || 0) + Number(t.amount)
+    }
 
-  // 1. Category overspend
-  const { data: budgets } = await supabase
-    .from('budgets')
-    .select('category_id, amount, categories(name, group_name)')
-    .eq('month', currentMonth)
-    .gt('amount', 0)
+    for (const budget of budgets) {
+      const actual = actualByCategory[budget.category_id] || 0
+      if (actual > Number(budget.amount)) {
+        alerts.push({
+          type: 'category_overspend',
+          message: `${budget.cat_name} is over budget: spent $${actual.toFixed(0)} vs $${Number(budget.amount).toFixed(0)} budgeted`,
+          metadata: { category_id: budget.category_id, actual, budgeted: Number(budget.amount) },
+        })
+      } else {
+        const projected = monthFraction > 0 ? actual / monthFraction : 0
+        if (projected > Number(budget.amount) * 1.1 && actual > Number(budget.amount) * 0.5) {
+          alerts.push({
+            type: 'mid_month_pace_warning',
+            message: `${budget.cat_name} is on pace to exceed budget — projected $${projected.toFixed(0)} vs $${Number(budget.amount).toFixed(0)}`,
+          })
+        }
+      }
+    }
 
-  const { data: transactions } = await supabase
-    .from('transactions')
-    .select('category_id, amount')
-    .gte('date', currentMonth)
-    .lt('date', nextMonth)
-    .eq('is_transfer', false)
-    .not('category_id', 'is', null)
-
-  const actualByCategory: Record<string, number> = {}
-  for (const tx of transactions || []) {
-    if (!tx.category_id) continue
-    actualByCategory[tx.category_id] = (actualByCategory[tx.category_id] || 0) + Math.abs(tx.amount)
-  }
-
-  for (const budget of (budgets as any[]) || []) {
-    const actual = actualByCategory[budget.category_id] || 0
-    const cat = budget.categories
-
-    // Check overspend
-    if (actual > budget.amount) {
+    // Uncategorized backlog (>5 transactions older than 3 days)
+    const threeDaysAgo = new Date(now.getTime() - 3 * 86400000).toISOString()
+    const [backlogRow] = await sql`
+      SELECT COUNT(*) as count FROM transactions
+      WHERE household_id = ${householdId}
+        AND category_id IS NULL AND is_reviewed = false
+        AND imported_at < ${threeDaysAgo}
+    `
+    if (Number(backlogRow.count) > 5) {
       alerts.push({
-        type: 'category_overspend',
-        message: `${cat?.name} is over budget: spent $${actual.toFixed(0)} vs $${budget.amount.toFixed(0)} budgeted`,
-        metadata: { category_id: budget.category_id, actual, budgeted: budget.amount },
+        type: 'uncategorized_backlog',
+        message: `${backlogRow.count} transactions have been uncategorized for more than 3 days`,
       })
     }
-    // Check mid-month pace warning (>10% over projected)
-    else {
-      const projected = monthFraction > 0 ? actual / monthFraction : 0
-      if (projected > budget.amount * 1.10 && actual > budget.amount * 0.5) {
+
+    // Weekly reminder (Sundays)
+    if (now.getDay() === 0) {
+      const weekAgo = new Date(now.getTime() - 7 * 86400000).toISOString().substring(0, 10)
+      const [existing] = await sql`
+        SELECT id FROM weekly_reviews
+        WHERE household_id = ${householdId} AND week_start >= ${weekAgo}
+      `
+      if (!existing) {
+        alerts.push({ type: 'weekly_review_reminder', message: "Sunday review: Check this week's spending" })
+      }
+    }
+
+    // Monthly reminder (1st of month)
+    if (dayOfMonth === 1) {
+      const prevMonth = now.getMonth() === 0
+        ? `${now.getFullYear() - 1}-12-01`
+        : `${now.getFullYear()}-${String(now.getMonth()).padStart(2, '0')}-01`
+      const [existing] = await sql`
+        SELECT id FROM monthly_reviews
+        WHERE household_id = ${householdId} AND month = ${prevMonth} AND completed_at IS NOT NULL
+      `
+      if (!existing) {
         alerts.push({
-          type: 'mid_month_pace_warning',
-          message: `${cat?.name} is on pace to exceed budget — projected $${projected.toFixed(0)} vs $${budget.amount.toFixed(0)} budget`,
-          metadata: { category_id: budget.category_id, projected, budgeted: budget.amount },
+          type: 'monthly_review_reminder',
+          message: `Monthly review due for ${new Date(prevMonth).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}`,
         })
       }
     }
-  }
 
-  // 2. Uncategorized backlog
-  const threeDaysAgo = new Date()
-  threeDaysAgo.setDate(threeDaysAgo.getDate() - 3)
-
-  const { count: backlogCount } = await supabase
-    .from('transactions')
-    .select('*', { count: 'exact', head: true })
-    .is('category_id', null)
-    .eq('is_reviewed', false)
-    .lt('imported_at', threeDaysAgo.toISOString())
-
-  if ((backlogCount || 0) > 5) {
-    alerts.push({
-      type: 'uncategorized_backlog',
-      message: `${backlogCount} transactions have been uncategorized for more than 3 days`,
-      metadata: { count: backlogCount },
-    })
-  }
-
-  // 3. Weekly review reminder (Sundays)
-  if (now.getDay() === 0) {
-    const weekStart = new Date(now)
-    weekStart.setDate(now.getDate() - 7)
-
-    const { data: existingWeekly } = await supabase
-      .from('weekly_reviews')
-      .select('id')
-      .gte('week_start', weekStart.toISOString().substring(0, 10))
-      .single()
-
-    if (!existingWeekly) {
-      alerts.push({
-        type: 'weekly_review_reminder',
-        message: 'Sunday review: Check this week\'s spending and categorize any pending transactions',
-      })
+    // Insert deduped
+    for (const alert of alerts) {
+      const [existing] = await sql`
+        SELECT id FROM notifications
+        WHERE household_id = ${householdId} AND type = ${alert.type} AND created_at > ${oneHourAgo}
+      `
+      if (!existing) {
+        await sql`
+          INSERT INTO notifications (household_id, type, message, metadata, is_read)
+          VALUES (${householdId}, ${alert.type}, ${alert.message}, ${JSON.stringify(alert.metadata ?? null)}, false)
+        `
+      }
     }
+
+    return NextResponse.json({ generated: alerts.length })
+  } catch (e: any) {
+    if (e.message === 'UNAUTHORIZED') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return NextResponse.json({ error: 'Internal error' }, { status: 500 })
   }
-
-  // 4. Monthly review reminder (first day of month)
-  if (dayOfMonth === 1) {
-    const prevMonth = now.getMonth() === 0
-      ? `${now.getFullYear() - 1}-12-01`
-      : `${now.getFullYear()}-${String(now.getMonth()).padStart(2, '0')}-01`
-
-    const { data: existingMonthly } = await supabase
-      .from('monthly_reviews')
-      .select('id')
-      .eq('month', prevMonth)
-      .not('completed_at', 'is', null)
-      .single()
-
-    if (!existingMonthly) {
-      alerts.push({
-        type: 'monthly_review_reminder',
-        message: `Monthly review due: Review ${new Date(prevMonth).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} actuals vs budget`,
-        metadata: { month: prevMonth },
-      })
-    }
-  }
-
-  // Insert new alerts (deduplicate by type + recent time window)
-  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString()
-
-  for (const alert of alerts) {
-    const { data: existing } = await supabase
-      .from('notifications')
-      .select('id')
-      .eq('type', alert.type)
-      .gt('created_at', oneHourAgo)
-      .single()
-
-    if (!existing) {
-      await supabase.from('notifications').insert({
-        type: alert.type,
-        message: alert.message,
-        metadata: alert.metadata || null,
-        is_read: false,
-      })
-    }
-  }
-
-  return NextResponse.json({ generated: alerts.length, alerts })
 }

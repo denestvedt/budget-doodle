@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { formatCurrency, formatDate } from '@/lib/utils/format'
 import Link from 'next/link'
 
@@ -41,68 +40,48 @@ export default function TransactionsPage() {
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
 
-  const supabase = createClient()
-
   const loadData = useCallback(async () => {
     setLoading(true)
 
-    let query = supabase
-      .from('transactions')
-      .select(`
-        id, date, description, amount, is_reviewed, is_transfer, category_id, ai_confidence,
-        categories(id, name, group_name, type),
-        accounts(id, name, institution)
-      `, { count: 'exact' })
-      .order('date', { ascending: false })
-      .range((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE - 1)
+    const params = new URLSearchParams({ page: String(page) })
+    if (search) params.set('search', search)
+    if (filterCategory) params.set('category', filterCategory)
+    if (filterAccount) params.set('account', filterAccount)
+    if (filterMonth) params.set('month', filterMonth)
 
-    if (search) {
-      query = query.ilike('description', `%${search}%`)
-    }
-    if (filterCategory) {
-      query = query.eq('category_id', filterCategory)
-    }
-    if (filterAccount) {
-      query = query.eq('account_id', filterAccount)
-    }
-    if (filterMonth) {
-      const [year, month] = filterMonth.split('-')
-      const start = `${year}-${month}-01`
-      const end = month === '12' ? `${Number(year) + 1}-01-01` : `${year}-${String(Number(month) + 1).padStart(2, '0')}-01`
-      query = query.gte('date', start).lt('date', end)
-    }
+    const [txRes, catsRes, acctRes] = await Promise.all([
+      fetch(`/api/transactions?${params}`),
+      fetch('/api/categories'),
+      fetch('/api/accounts'),
+    ])
 
-    const { data, count } = await query
-    setTransactions((data as any[]) || [])
-    setTotal(count || 0)
-
-    const { data: cats } = await supabase
-      .from('categories')
-      .select('id, name, group_name')
-      .eq('is_hidden', false)
-      .order('group_name')
-      .order('name')
-    setCategories(cats || [])
-
-    const { data: accts } = await supabase
-      .from('accounts')
-      .select('id, name')
-      .eq('is_active', true)
-      .order('name')
-    setAccounts(accts || [])
+    if (txRes.ok) {
+      const d = await txRes.json()
+      setTransactions(d.transactions || [])
+      setTotal(d.total || 0)
+    }
+    if (catsRes.ok) {
+      const d = await catsRes.json()
+      setCategories(d.categories || [])
+    }
+    if (acctRes.ok) {
+      const d = await acctRes.json()
+      setAccounts(d.accounts || [])
+    }
 
     setLoading(false)
-  }, [supabase, search, filterCategory, filterAccount, filterMonth, page])
+  }, [search, filterCategory, filterAccount, filterMonth, page])
 
   useEffect(() => {
     loadData()
   }, [loadData])
 
   const updateCategory = async (txId: string, categoryId: string) => {
-    await supabase
-      .from('transactions')
-      .update({ category_id: categoryId, is_reviewed: true })
-      .eq('id', txId)
+    await fetch('/api/transactions', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [txId], categoryId }),
+    })
 
     setTransactions((prev) =>
       prev.map((t) =>
@@ -134,10 +113,11 @@ export default function TransactionsPage() {
   const applyBulkCategory = async () => {
     if (!bulkCategory || selectedIds.size === 0) return
     const ids = Array.from(selectedIds)
-    await supabase
-      .from('transactions')
-      .update({ category_id: bulkCategory, is_reviewed: true })
-      .in('id', ids)
+    await fetch('/api/transactions', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, categoryId: bulkCategory }),
+    })
     setSelectedIds(new Set())
     setBulkCategory('')
     loadData()

@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { formatCurrency } from '@/lib/utils/format'
 
 interface YearlyRow {
@@ -21,7 +20,6 @@ export default function YearlyBudgetPage() {
   const [rows, setRows] = useState<YearlyRow[]>([])
   const [loading, setLoading] = useState(true)
 
-  const supabase = createClient()
   const currentMonth = new Date().getMonth() + 1
   const currentYear = new Date().getFullYear()
 
@@ -32,74 +30,13 @@ export default function YearlyBudgetPage() {
 
   const loadData = useCallback(async () => {
     setLoading(true)
-
-    const yearStart = `${year}-01-01`
-    const yearEnd = `${year + 1}-01-01`
-
-    const { data: categories } = await supabase
-      .from('categories')
-      .select('id, name, group_name, type')
-      .eq('is_hidden', false)
-      .order('group_name')
-      .order('sort_order')
-      .order('name')
-
-    const { data: budgets } = await supabase
-      .from('budgets')
-      .select('category_id, month, amount')
-      .gte('month', yearStart)
-      .lt('month', yearEnd)
-
-    const { data: transactions } = await supabase
-      .from('transactions')
-      .select('category_id, amount, date')
-      .gte('date', yearStart)
-      .lt('date', yearEnd)
-      .eq('is_transfer', false)
-      .not('category_id', 'is', null)
-
-    // Build maps
-    const budgetMap = new Map<string, number>() // key: "cat_id|month"
-    for (const b of budgets || []) {
-      budgetMap.set(`${b.category_id}|${b.month}`, b.amount)
+    const res = await fetch(`/api/budget/yearly?year=${year}`)
+    if (res.ok) {
+      const d = await res.json()
+      setRows(d.rows || [])
     }
-
-    const actualMap = new Map<string, number>()
-    for (const t of transactions || []) {
-      if (!t.category_id) continue
-      const monthKey = t.date.substring(0, 7) + '-01'
-      const key = `${t.category_id}|${monthKey}`
-      actualMap.set(key, (actualMap.get(key) || 0) + Math.abs(t.amount))
-    }
-
-    // Build rows
-    const yearlyRows: YearlyRow[] = (categories || []).map((cat) => {
-      const monthData: Record<string, { budgeted: number; actual: number }> = {}
-      let totalBudgeted = 0
-      let totalActual = 0
-
-      for (const month of months) {
-        const key = `${cat.id}|${month}`
-        const budgeted = budgetMap.get(key) || 0
-        const actual = actualMap.get(key) || 0
-        monthData[month] = { budgeted, actual }
-        totalBudgeted += budgeted
-        totalActual += actual
-      }
-
-      return {
-        category_id: cat.id,
-        name: cat.name,
-        group_name: cat.group_name,
-        months: monthData,
-        totalBudgeted,
-        totalActual,
-      }
-    })
-
-    setRows(yearlyRows)
     setLoading(false)
-  }, [supabase, year])
+  }, [year])
 
   useEffect(() => {
     loadData()
@@ -133,17 +70,11 @@ export default function YearlyBudgetPage() {
           <p className="text-sm text-gray-500 mt-0.5">Budget vs. actual for each category · Color: green = under, red = over</p>
         </div>
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => setYear((y) => y - 1)}
-            className="btn-secondary py-1.5 px-3"
-          >
+          <button onClick={() => setYear((y) => y - 1)} className="btn-secondary py-1.5 px-3">
             ← {year - 1}
           </button>
           <span className="font-bold text-lg" style={{ color: '#1E3A5F' }}>{year}</span>
-          <button
-            onClick={() => setYear((y) => y + 1)}
-            className="btn-secondary py-1.5 px-3"
-          >
+          <button onClick={() => setYear((y) => y + 1)} className="btn-secondary py-1.5 px-3">
             {year + 1} →
           </button>
         </div>
@@ -180,7 +111,6 @@ export default function YearlyBudgetPage() {
               <tbody>
                 {groupedRows.map(({ group, rows: groupRows }) => (
                   <>
-                    {/* Group header */}
                     <tr key={`group-${group}`} style={{ backgroundColor: '#f0f4f9' }}>
                       <td
                         colSpan={14}
@@ -192,23 +122,16 @@ export default function YearlyBudgetPage() {
                     </tr>
                     {groupRows.map((row) => (
                       <tr key={row.category_id} className="border-b border-gray-50 hover:bg-gray-50">
-                        <td
-                          className="px-3 py-2 font-medium text-gray-700 sticky left-0 bg-white"
-                          style={{ minWidth: '160px' }}
-                        >
+                        <td className="px-3 py-2 font-medium text-gray-700 sticky left-0 bg-white" style={{ minWidth: '160px' }}>
                           {row.name}
                         </td>
                         {months.map((month, i) => {
-                          const data = row.months[month]
+                          const data = row.months[month] || { budgeted: 0, actual: 0 }
                           const cellClass = getCellColor(data.budgeted, data.actual, i)
                           return (
                             <td key={month} className={`px-2 py-2 text-right ${cellClass}`} style={{ minWidth: '72px' }}>
-                              {data.actual > 0 && (
-                                <div>{formatCurrency(data.actual)}</div>
-                              )}
-                              {data.budgeted > 0 && (
-                                <div className="text-gray-400 font-normal">{formatCurrency(data.budgeted)}</div>
-                              )}
+                              {data.actual > 0 && <div>{formatCurrency(data.actual)}</div>}
+                              {data.budgeted > 0 && <div className="text-gray-400 font-normal">{formatCurrency(data.budgeted)}</div>}
                               {data.actual === 0 && data.budgeted === 0 && '—'}
                             </td>
                           )

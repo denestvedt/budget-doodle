@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import {
   formatCurrency,
   formatPercent,
@@ -36,75 +35,15 @@ export default function MonthlyBudgetPage() {
   const [budgetInput, setBudgetInput] = useState('')
   const [saving, setSaving] = useState(false)
 
-  const supabase = createClient()
-
   const loadData = useCallback(async () => {
     setLoading(true)
-
-    const nextMonth = getNextMonth(month)
-
-    const { data: categories } = await supabase
-      .from('categories')
-      .select('id, name, group_name, type')
-      .eq('is_hidden', false)
-      .order('group_name')
-      .order('sort_order')
-      .order('name')
-
-    const { data: budgets } = await supabase
-      .from('budgets')
-      .select('category_id, amount')
-      .eq('month', month)
-
-    const { data: transactions } = await supabase
-      .from('transactions')
-      .select('category_id, amount')
-      .gte('date', month)
-      .lt('date', nextMonth)
-      .eq('is_transfer', false)
-      .not('category_id', 'is', null)
-
-    // Build budget map
-    const budgetMap = new Map<string, number>()
-    for (const b of budgets || []) {
-      budgetMap.set(b.category_id, b.amount)
+    const res = await fetch(`/api/budget/monthly?month=${month}`)
+    if (res.ok) {
+      const d = await res.json()
+      setGroups(d.groups || [])
     }
-
-    // Build actuals map
-    const actualMap = new Map<string, number>()
-    for (const t of transactions || []) {
-      if (!t.category_id) continue
-      actualMap.set(t.category_id, (actualMap.get(t.category_id) || 0) + Math.abs(t.amount))
-    }
-
-    // Build grouped structure
-    const groupMap = new Map<string, BudgetRow[]>()
-    for (const cat of categories || []) {
-      if (!groupMap.has(cat.group_name)) groupMap.set(cat.group_name, [])
-      groupMap.get(cat.group_name)!.push({
-        category_id: cat.id,
-        name: cat.name,
-        group_name: cat.group_name,
-        budgeted: budgetMap.get(cat.id) || 0,
-        actual: actualMap.get(cat.id) || 0,
-      })
-    }
-
-    const grouped: GroupedBudget[] = GROUP_ORDER
-      .filter((g) => groupMap.has(g))
-      .map((g) => {
-        const rows = groupMap.get(g) || []
-        return {
-          group: g,
-          rows,
-          totalBudgeted: rows.reduce((s, r) => s + r.budgeted, 0),
-          totalActual: rows.reduce((s, r) => s + r.actual, 0),
-        }
-      })
-
-    setGroups(grouped)
     setLoading(false)
-  }, [supabase, month])
+  }, [month])
 
   useEffect(() => {
     loadData()
@@ -118,9 +57,11 @@ export default function MonthlyBudgetPage() {
     }
 
     setSaving(true)
-    await supabase
-      .from('budgets')
-      .upsert({ category_id: categoryId, month, amount }, { onConflict: 'household_id,category_id,month' })
+    await fetch('/api/budget/monthly', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ categoryId, month, amount }),
+    })
 
     setEditingBudget(null)
     setBudgetInput('')
@@ -133,7 +74,6 @@ export default function MonthlyBudgetPage() {
   const daysRemaining = getDaysRemaining()
   const monthProgress = (dayOfMonth / totalDays) * 100
 
-  // Total income vs expenses
   const incomeGroup = groups.find((g) => g.group === 'Income')
   const expenseGroups = groups.filter((g) => g.group !== 'Income' && g.group !== 'Transfer')
   const totalExpenseBudget = expenseGroups.reduce((s, g) => s + g.totalBudgeted, 0)
@@ -142,7 +82,6 @@ export default function MonthlyBudgetPage() {
   const getPaceStatus = (actual: number, budgeted: number) => {
     if (budgeted === 0) return null
     const paceTarget = (dayOfMonth / totalDays) * budgeted
-    const ratio = actual / budgeted
     if (actual > budgeted) return 'over'
     if (actual > paceTarget * 1.1) return 'warning'
     return 'ok'
@@ -327,10 +266,4 @@ export default function MonthlyBudgetPage() {
       )}
     </div>
   )
-}
-
-function getNextMonth(monthStr: string): string {
-  const [year, month] = monthStr.split('-').map(Number)
-  if (month === 12) return `${year + 1}-01-01`
-  return `${year}-${String(month + 1).padStart(2, '0')}-01`
 }

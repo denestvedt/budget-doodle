@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { formatCurrency, formatDate } from '@/lib/utils/format'
 import Link from 'next/link'
 
@@ -35,35 +34,23 @@ export default function ReviewQueuePage() {
   const [bulkCategory, setBulkCategory] = useState('')
   const [saving, setSaving] = useState(false)
 
-  const supabase = createClient()
-
   const loadData = useCallback(async () => {
     setLoading(true)
-    const { data: txs } = await supabase
-      .from('transactions')
-      .select(`
-        id, date, description, full_description, amount, category_id, category_hint, ai_confidence, is_reviewed,
-        categories(id, name, group_name),
-        accounts(id, name, institution)
-      `)
-      .eq('is_reviewed', false)
-      .order('date', { ascending: false })
-      .limit(100)
+    const [txRes, catsRes] = await Promise.all([
+      fetch('/api/transactions/review'),
+      fetch('/api/categories'),
+    ])
 
-    const { data: cats } = await supabase
-      .from('categories')
-      .select('id, name, group_name')
-      .eq('is_hidden', false)
-      .order('group_name')
-      .order('name')
+    const txs: Transaction[] = txRes.ok ? (await txRes.json()).transactions || [] : []
+    const cats: Category[] = catsRes.ok ? (await catsRes.json()).categories || [] : []
 
-    setTransactions((txs as any[]) || [])
-    setCategories(cats || [])
+    setTransactions(txs)
+    setCategories(cats)
 
     // Pre-populate category selections
     const initial: Record<string, string> = {}
     const initialLearn: Record<string, boolean> = {}
-    for (const tx of (txs as any[]) || []) {
+    for (const tx of txs) {
       if (tx.category_id) initial[tx.id] = tx.category_id
       initialLearn[tx.id] = true
     }
@@ -71,7 +58,7 @@ export default function ReviewQueuePage() {
     setLearnRule(initialLearn)
 
     setLoading(false)
-  }, [supabase])
+  }, [])
 
   useEffect(() => {
     loadData()
@@ -83,28 +70,13 @@ export default function ReviewQueuePage() {
 
     setSaving(true)
     const tx = transactions.find((t) => t.id === txId)
-    if (!tx) return
+    if (!tx) { setSaving(false); return }
 
-    await supabase
-      .from('transactions')
-      .update({ category_id: categoryId, is_reviewed: true })
-      .eq('id', txId)
-
-    // Save rule if learn is enabled
-    if (learnRule[txId] && tx) {
-      const pattern = tx.description.toLowerCase().trim()
-      await supabase
-        .from('category_rules')
-        .upsert(
-          {
-            merchant_pattern: pattern,
-            category_id: categoryId,
-            confidence: 1.0,
-            last_used_at: new Date().toISOString(),
-          },
-          { onConflict: 'household_id,merchant_pattern', ignoreDuplicates: false }
-        )
-    }
+    await fetch('/api/transactions/review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ txId, categoryId, learnRule: learnRule[txId] !== false }),
+    })
 
     setTransactions((prev) => prev.filter((t) => t.id !== txId))
     setSaving(false)
@@ -114,26 +86,15 @@ export default function ReviewQueuePage() {
     setSaving(true)
     const toConfirm = transactions.filter((t) => selectedCategory[t.id])
     for (const tx of toConfirm) {
-      const categoryId = selectedCategory[tx.id]
-      await supabase
-        .from('transactions')
-        .update({ category_id: categoryId, is_reviewed: true })
-        .eq('id', tx.id)
-
-      if (learnRule[tx.id]) {
-        const pattern = tx.description.toLowerCase().trim()
-        await supabase
-          .from('category_rules')
-          .upsert(
-            {
-              merchant_pattern: pattern,
-              category_id: categoryId,
-              confidence: 1.0,
-              last_used_at: new Date().toISOString(),
-            },
-            { onConflict: 'household_id,merchant_pattern', ignoreDuplicates: false }
-          )
-      }
+      await fetch('/api/transactions/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          txId: tx.id,
+          categoryId: selectedCategory[tx.id],
+          learnRule: learnRule[tx.id] !== false,
+        }),
+      })
     }
     loadData()
     setSaving(false)

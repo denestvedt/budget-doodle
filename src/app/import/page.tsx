@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { parseCSV, type ParsedTransaction, type Institution } from '@/lib/csv/parsers'
 import { formatCurrency, formatDate } from '@/lib/utils/format'
 
@@ -40,17 +39,14 @@ export default function ImportPage() {
   const [summary, setSummary] = useState<ImportSummary | null>(null)
   const [endingBalance, setEndingBalance] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const supabase = createClient()
 
   const loadAccounts = useCallback(async () => {
-    const { data } = await supabase
-      .from('accounts')
-      .select('id, name, institution, type')
-      .eq('is_active', true)
-      .order('institution')
-      .order('name')
-    setAccounts(data || [])
-  }, [supabase])
+    const res = await fetch('/api/accounts')
+    if (res.ok) {
+      const d = await res.json()
+      setAccounts(d.accounts || [])
+    }
+  }, [])
 
   useEffect(() => {
     loadAccounts()
@@ -76,21 +72,20 @@ export default function ImportPage() {
 
   const createAccount = async () => {
     if (!newAccountName || !newAccountInstitution) return
-    const { data } = await supabase
-      .from('accounts')
-      .insert({
+    const res = await fetch('/api/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         name: newAccountName,
         institution: newAccountInstitution,
         type: newAccountType,
         class: newAccountType === 'CREDIT' ? 'Liability' : 'Asset',
-        last_balance: 0,
-      })
-      .select()
-      .single()
-
-    if (data) {
-      setAccounts((prev) => [...prev, data])
-      setSelectedAccount(data.id)
+      }),
+    })
+    if (res.ok) {
+      const { account } = await res.json()
+      setAccounts((prev) => [...prev, account])
+      setSelectedAccount(account.id)
       setCreating(false)
       setNewAccountName('')
       setNewAccountInstitution('')
@@ -102,151 +97,26 @@ export default function ImportPage() {
     setImporting(true)
     setSummary(null)
 
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
+    const res = await fetch('/api/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountId: selectedAccount,
+        transactions: parsed.transactions,
+        endingBalance: endingBalance ? parseFloat(endingBalance) : undefined,
+      }),
+    })
 
-    // Load categories for AI categorization
-    const { data: categories } = await supabase
-      .from('categories')
-      .select('id, name, group_name')
-      .eq('is_hidden', false)
-
-    // Load existing rules
-    const { data: rules } = await supabase
-      .from('category_rules')
-      .select('merchant_pattern, category_id, confidence')
-
-    const ruleMap = new Map<string, { category_id: string; confidence: number }>()
-    for (const rule of rules || []) {
-      ruleMap.set(rule.merchant_pattern.toLowerCase(), {
-        category_id: rule.category_id,
-        confidence: rule.confidence,
+    if (res.ok) {
+      const result = await res.json()
+      setSummary({
+        total: parsed.transactions.length,
+        inserted: result.inserted || 0,
+        duplicates: result.duplicates || 0,
+        errors: result.errors || 0,
       })
     }
 
-    let inserted = 0
-    let duplicates = 0
-    let errors = 0
-
-    // Process transactions in batches
-    const batchSize = 50
-    const toInsert = []
-
-    for (const tx of parsed.transactions) {
-      // Check rule cache
-      const pattern = tx.description.toLowerCase().trim()
-      const cachedRule = ruleMap.get(pattern)
-
-      let categoryId: string | null = null
-      let aiConfidence: number | null = null
-      let categoryHint: string | null = null
-      let isReviewed = false
-
-      if (cachedRule) {
-        categoryId = cachedRule.category_id
-        aiConfidence = cachedRule.confidence
-        isReviewed = cachedRule.confidence >= 0.85
-      }
-
-      toInsert.push({
-        account_id: selectedAccount,
-        date: tx.date,
-        description: tx.description,
-        full_description: tx.full_description,
-        amount: tx.amount,
-        category_id: categoryId,
-        category_hint: categoryHint,
-        ai_confidence: aiConfidence,
-        is_reviewed: isReviewed,
-        is_transfer: false,
-        dedup_hash: tx.dedupHash,
-        imported_by_user_id: session.user.id,
-      })
-    }
-
-    // Batch insert
-    for (let i = 0; i < toInsert.length; i += batchSize) {
-      const batch = toInsert.slice(i, i + batchSize)
-      const { data: insertedData, error } = await supabase
-        .from('transactions')
-        .upsert(batch, { onConflict: 'household_id,dedup_hash', ignoreDuplicates: true })
-        .select('id')
-
-      if (error) {
-        console.error('Insert error:', error)
-        errors += batch.length
-      } else {
-        const count = insertedData?.length || 0
-        inserted += count
-        duplicates += batch.length - count
-      }
-    }
-
-    // Update account balance if provided
-    if (endingBalance && selectedAccount) {
-      const balance = parseFloat(endingBalance)
-      if (!isNaN(balance)) {
-        await supabase
-          .from('accounts')
-          .update({ last_balance: balance, last_updated: new Date().toISOString() })
-          .eq('id', selectedAccount)
-
-        // Save balance snapshot
-        const today = new Date().toISOString().substring(0, 10)
-        await supabase
-          .from('balance_snapshots')
-          .upsert({ account_id: selectedAccount, balance, snapshot_date: today, source: 'csv_import' })
-      }
-    }
-
-    // Trigger AI categorization for uncategorized transactions
-    if (inserted > 0) {
-      const { data: uncategorized } = await supabase
-        .from('transactions')
-        .select('id, description, amount')
-        .eq('account_id', selectedAccount)
-        .is('category_id', null)
-        .limit(100)
-
-      if (uncategorized && uncategorized.length > 0) {
-        try {
-          const response = await fetch('/api/categorize', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ transactions: uncategorized }),
-          })
-          const { results } = await response.json()
-
-          for (const result of results || []) {
-            const cat = categories?.find((c) => c.name === result.category)
-            if (cat) {
-              const isReviewed = result.confidence >= 0.85
-              await supabase
-                .from('transactions')
-                .update({
-                  category_id: cat.id,
-                  category_hint: result.category,
-                  ai_confidence: result.confidence,
-                  is_reviewed: isReviewed,
-                })
-                .eq('id', result.id)
-            } else if (result.category) {
-              await supabase
-                .from('transactions')
-                .update({
-                  category_hint: result.category,
-                  ai_confidence: result.confidence,
-                })
-                .eq('id', result.id)
-            }
-          }
-        } catch (err) {
-          console.error('AI categorization failed:', err)
-        }
-      }
-    }
-
-    setSummary({ total: parsed.transactions.length, inserted, duplicates, errors })
     setImporting(false)
     setParsed(null)
     setFile(null)
